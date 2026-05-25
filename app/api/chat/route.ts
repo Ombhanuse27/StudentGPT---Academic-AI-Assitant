@@ -5,19 +5,6 @@ import fs from 'fs';
 import path from 'path';
 import { extractText } from 'unpdf';
 
-// 📁 Store uploaded documents in memory (persisted globally across requests)
-declare global {
-  var documentStore: Map<string, string> | undefined;
-  var documentFileNameMap: Map<string, string> | undefined;
-}
-
-const documentStore = global.documentStore ?? new Map<string, string>();
-const documentFileNameMap = global.documentFileNameMap ?? new Map<string, string>();
-
-// Persist to global to maintain state across requests
-global.documentStore = documentStore;
-global.documentFileNameMap = documentFileNameMap;
-
 const get_syllabus_from_pdf = async ({ subject, unit }: { subject: string; unit: string }) => {
   try {
     const syllabusPath = path.join(process.cwd(), 'public/TY-CSE-syllabus.pdf');
@@ -203,305 +190,6 @@ function convertToRoman(num: string): string {
   return romanNumerals[num] || num;
 }
 
-// 📄 Extract text from uploaded PDF
-async function extractTextFromPDF(base64Data: string): Promise<string> {
-  const buffer = new Uint8Array(Buffer.from(base64Data, 'base64'));
-  const { text } = await extractText(buffer, { mergePages: true });
-  return text;
-}
-
-// 📝 Extract text from TXT/MD files
-function extractTextFromPlainText(base64Data: string): string {
-  const buffer = Buffer.from(base64Data, 'base64');
-  return buffer.toString('utf-8');
-}
-
-// 🆕 Upload and store document
-async function upload_document({ 
-  documentId, 
-  fileName, 
-  fileContent, 
-  fileType 
-}: any) {
-  try {
-    console.log(`📤 Uploading document: ${fileName} (${fileType})`);
-    
-    let extractedText = '';
-
-    if (fileType === 'application/pdf') {
-      extractedText = await extractTextFromPDF(fileContent);
-    } else if (fileType === 'text/plain' || fileType === 'text/markdown') {
-      extractedText = extractTextFromPlainText(fileContent);
-    } else {
-      return `# ❌ Unsupported File Type
-
-**File Type:** \`${fileType}\`
-
-## ✅ Supported Formats:
-| Format | Extension | Description |
-|--------|-----------|-------------|
-| 📄 PDF | .pdf | Portable Document Format |
-| 📝 Text | .txt | Plain text files |
-| 📋 Markdown | .md | Markdown documents |
-
-**Please upload a file in one of the supported formats above.**`;
-    }
-
-    // Validate extracted content
-    if (!extractedText || extractedText.trim().length === 0) {
-      return `# ⚠️ Empty Document
-
-**File:** ${fileName}
-
-The document appears to be empty or couldn't be read properly.
-
-## 🔍 Please check:
-- The file is not corrupted
-- The file actually contains text content
-- The file is not password-protected (for PDFs)
-
-Try uploading a different file or check the original document.`;
-    }
-
-    // ✅ NEW: Check if PDF is image-based (very low character count)
-    const wordCount = extractedText.split(/\s+/).filter(word => word.length > 0).length;
-    const isLikelyImageBased = fileType === 'application/pdf' && wordCount < 10;
-
-    if (isLikelyImageBased) {
-      return `# ⚠️ Image-Based PDF Detected
-
-**File:** ${fileName}
-
-This appears to be a **scanned or image-based PDF** (only ${wordCount} words extracted).
-
-## 🔍 Why This Happened:
-- The PDF contains images of text rather than actual text
-- Certificates, scanned documents, and some forms are often image-based
-- Our system can only extract text from text-based PDFs
-
-## ✅ Solutions:
-1. **Use an OCR tool** to convert the PDF to text first:
-   - Adobe Acrobat (Tools → Enhance Scans → Recognize Text)
-   - Online tools: pdf2go.com, ilovepdf.com
-   - Desktop: Tesseract OCR
-2. **Copy-paste the text** into a .txt file and upload that instead
-3. **Re-export the PDF** from the original source with text enabled
-
-## 💡 Alternative:
-If you just need to reference this document, you can:
-- Ask me questions and **manually type the relevant information**
-- Upload a **text version** of the content
-
-**Sorry for the inconvenience! This limitation is due to the document format, not an error.** 📄`;
-    }
-
-    // ✅ PRODUCTION CHANGE: Persist document to PostgreSQL instead of in-memory Map
-    await pool.query(
-      `
-      INSERT INTO documents (id, file_name, content)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (id) DO UPDATE
-      SET content = EXCLUDED.content,
-          file_name = EXCLUDED.file_name
-      `,
-      [documentId, fileName, extractedText]
-    );
-
-    // Keep in-memory maps in sync for backward compatibility
-    documentStore.set(documentId, extractedText);
-    documentFileNameMap.set(fileName, documentId);
-
-    console.log(`✅ Stored document ${documentId} with ${extractedText.length} characters`);
-    console.log(`📝 Mapped fileName "${fileName}" -> documentId "${documentId}"`);
-
-    // Calculate document stats
-    const lineCount = extractedText.split('\n').length;
-
-    return `# ✅ Document Uploaded Successfully!
-
-## 📄 File Details:
-| Property | Value |
-|----------|-------|
-| **📁 File Name** | ${fileName} |
-| **📊 Characters** | ${extractedText.length.toLocaleString()} |
-| **📝 Words** | ${wordCount.toLocaleString()} |
-| **📄 Lines** | ${lineCount.toLocaleString()} |
-| **🆔 Document ID** | \`${documentId}\` |
-
----
-
-## 💬 What's Next?
-You can now ask me questions about this document! For example:
-- *"Summarize this document"*
-- *"What are the key points in this document?"*
-- *"Find information about [topic] in the document"*
-
-**I'm ready to help you explore the content! 🚀**`;
-  } catch (error: any) {
-    console.error('Document upload error:', error);
-    return `# ⚠️ Upload Error
-
-**An error occurred while uploading your document.**
-
-## 🔍 Error Details:
-\`${error.message}\`
-
-## 🛠️ Troubleshooting Steps:
-1. **Check file size** - Very large files may cause issues
-2. **Verify file format** - Ensure it's PDF, TXT, or MD
-3. **Try re-uploading** - Sometimes a retry fixes the issue
-4. **Check file integrity** - Make sure the file isn't corrupted
-
-If the problem persists, please try a different file or contact support.`;
-  }
-}
-
-// 🆕 Query uploaded document
-async function query_document({ documentId, question }: any) {
-  try {
-    console.log(`❓ Querying document ${documentId}: "${question}"`);
-    
-    // ✅ PRODUCTION CHANGE: Query PostgreSQL first, fall back to in-memory store
-    let documentContent: string | undefined;
-    let resolvedFileName: string | undefined;
-
-    const dbResult = await pool.query(
-      `
-      SELECT content, file_name
-      FROM documents
-      WHERE id = $1 OR file_name = $1
-      `,
-      [documentId]
-    );
-
-    if (dbResult.rows.length > 0) {
-      documentContent = dbResult.rows[0].content;
-      resolvedFileName = dbResult.rows[0].file_name;
-    }
-
-    // Fall back to in-memory store if not found in DB (e.g. during same-request lifecycle)
-    if (!documentContent) {
-      documentContent = documentStore.get(documentId);
-      if (!documentContent) {
-        const actualDocId = documentFileNameMap.get(documentId);
-        if (actualDocId) {
-          console.log(`🔄 Found documentId via fileName mapping: ${documentId} -> ${actualDocId}`);
-          documentContent = documentStore.get(actualDocId);
-        }
-      }
-    }
-
-    if (!documentContent) {
-      console.log(`❌ Document not found. Available documents:`, Array.from(documentStore.keys()));
-      console.log(`📋 Available fileName mappings:`, Array.from(documentFileNameMap.entries()));
-      
-      const availableDocs = Array.from(documentFileNameMap.keys());
-      
-      if (availableDocs.length === 0) {
-        return `# ❌ No Document Found
-
-**You haven't uploaded any documents yet.**
-
-## 📤 How to Upload:
-1. Click the **upload button** in the chat interface
-2. Select a PDF, TXT, or MD file
-3. Wait for the upload confirmation
-4. Then ask your questions!
-
-**I'll be ready to analyze your document once you upload it! 📚**`;
-      } else {
-        return `# ❌ Document Not Found
-
-**The document "${documentId}" could not be found.**
-
-## 📋 Available Documents:
-${availableDocs.map((doc, idx) => `${idx + 1}. **${doc}**`).join('\n')}
-
-**Please specify one of the documents above, or upload a new document.**`;
-      }
-    }
-
-    // ✅ NEW: Check if document content is essentially empty (image-based PDF)
-    const meaningfulContent = documentContent.replace(/\s+/g, ' ').trim();
-    const wordCount = meaningfulContent.split(/\s+/).filter(word => word.length > 0).length;
-    
-    if (wordCount < 10) {
-      // Get original filename if possible
-      let fileName = resolvedFileName || documentId;
-      if (!resolvedFileName) {
-        for (const [name, id] of documentFileNameMap.entries()) {
-          if (id === documentId) {
-            fileName = name;
-            break;
-          }
-        }
-      }
-
-      return `# ⚠️ Cannot Answer - Insufficient Content
-
-**Document:** ${fileName}
-
-This document appears to be **image-based or has minimal extractable text** (only ${wordCount} words found).
-
-## 🔍 The Issue:
-- Your PDF likely contains scanned images or graphics
-- Our system can only read actual text from PDFs
-- Certificates, scanned documents, and forms are often in this format
-
-## ✅ What You Can Do:
-
-### Option 1: Manual Input
-Just **tell me the information** you need help with! For example:
-- *"I have a certificate from [Organization] for [Course Name]"*
-- *"The document shows [specific details]"*
-
-### Option 2: Upload Text Version
-1. **Use OCR** to convert the PDF to text:
-   - Adobe Acrobat: Tools → Recognize Text
-   - Online: ilovepdf.com, pdf2go.com
-2. **Copy the text** into a .txt file
-3. **Re-upload** the text file
-
-### Option 3: Ask Differently
-If you need general help:
-- *"How do I format a certificate?"*
-- *"What should be included in a completion certificate?"*
-
-**I'm here to help - just need the content in a readable format! 📄✨**`;
-    }
-
-    // Truncate document if too long (Groq has token limits)
-    const maxChars = 25000; // Adjust based on your model's context window
-    const isTruncated = documentContent.length > maxChars;
-    const truncatedContent = isTruncated
-      ? documentContent.slice(0, maxChars) + '\n\n[... document truncated for length ...]'
-      : documentContent;
-
-    return {
-      content: truncatedContent,
-      question: question,
-      isTruncated: isTruncated,
-      originalLength: documentContent.length
-    };
-  } catch (error: any) {
-    console.error('Document query error:', error);
-    return `# ⚠️ Query Error
-
-**An error occurred while processing your question.**
-
-## 🔍 Error Details:
-\`${error.message}\`
-
-## 🛠️ What You Can Try:
-- **Rephrase your question** - Try asking in a different way
-- **Be more specific** - Include keywords from the document
-- **Re-upload the document** - If the issue persists
-- **Ask a simpler question** - Break down complex queries
-
-**I'm here to help once the issue is resolved! 💪**`;
-  }
-}
-
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
@@ -659,8 +347,6 @@ async function get_timetable({ year, branch }: any) {
     }
 
     // ✅ PRODUCTION CHANGE: PostgreSQL query with $1/$2 placeholders.
-    // NOTE: MySQL's ORDER BY FIELD() is replaced with a CASE expression for
-    // deterministic day ordering in PostgreSQL.
     const result = await pool.query(
       `SELECT day, time_slot, subject
        FROM timetable
@@ -834,56 +520,6 @@ const tools = [
         required: ["subject", "unit"]
       }
     }
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "upload_document",
-      description: "Upload and store a document (PDF, TXT, MD) for later querying.",
-      parameters: {
-        type: "object",
-        properties: {
-          documentId: {
-            type: "string",
-            description: "Unique identifier for the document"
-          },
-          fileName: {
-            type: "string",
-            description: "Name of the uploaded file"
-          },
-          fileContent: {
-            type: "string",
-            description: "Base64 encoded file content"
-          },
-          fileType: {
-            type: "string",
-            description: "MIME type of the file (e.g., 'application/pdf', 'text/plain')"
-          }
-        },
-        required: ["documentId", "fileName", "fileContent", "fileType"]
-      }
-    }
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "query_document",
-      description: "Answer questions about a previously uploaded document. Use the documentId OR fileName from the most recent upload.",
-      parameters: {
-        type: "object",
-        properties: {
-          documentId: {
-            type: "string",
-            description: "The ID or fileName of the uploaded document to query"
-          },
-          question: {
-            type: "string",
-            description: "The question to answer from the document"
-          }
-        },
-        required: ["documentId", "question"]
-      }
-    }
   }
 ];
 
@@ -917,39 +553,9 @@ Special instruction for syllabus requests:
 - The study tips should include: important points to focus on, example/problem practice advice, and revision strategies.
 - Make the tips concise, actionable, and relevant to the specific syllabus unit.
 
-📄 Document Upload & Query Feature:
-- Users can upload documents (PDF, TXT, MD) to ask questions about them.
-- When a user uploads a document, use the upload_document tool to store it.
-- When a user asks questions about their uploaded document, use the query_document tool.
-- ✅ IMPORTANT: When calling query_document, use EITHER the documentId OR the fileName (whichever the user mentions or that was most recently uploaded).
-- You can answer questions by analyzing the document content returned from query_document.
-- CRITICAL: When answering questions about uploaded documents, ONLY use information from the uploaded document content, not from your general knowledge. If the information is not in the document, explicitly state that.
-- If a document was truncated due to length, inform the user and suggest they ask more specific questions.
-- ⚠️ IMAGE-BASED PDFs: If a user uploads a certificate, scanned document, or image-based PDF that has minimal text, the upload will fail with a helpful error message. DO NOT call query_document on such documents. Instead, ask the user to either:
-  1. Provide the information manually (you can help based on what they tell you)
-  2. Use OCR to convert the PDF to text first
-  3. Upload a text-based version
-
-  ⚠️ CRITICAL - Tool Calling Format:
-- When calling tools, use ONLY the exact function names provided: get_attendance, get_timetable, get_syllabus_from_pdf, upload_document, query_document
+⚠️ CRITICAL - Tool Calling Format:
+- When calling tools, use ONLY the exact function names provided: get_attendance, get_timetable, get_syllabus_from_pdf
 - Do NOT add spaces between function name and parameters
-- Format: query_document{"documentId":"...","question":"..."}
-- NOT: query_document {"documentId":"...","question":"..."}
-
-🎯 Handling Document Upload Confirmations:
-- When a user sees a document upload confirmation message, DO NOT treat it as a question.
-- If the message is just the upload confirmation (starting with "# ✅ Document Uploaded Successfully!"), respond briefly and encouragingly like:
-  - "Great! Your document is ready. What would you like to know about it?"
-  - "Perfect! The document is loaded. Feel free to ask any questions!"
-  - "Document uploaded! I'm ready to help - just ask your question."
-- NEVER instruct them on how to format queries with documentId - they can just ask naturally.
-- If they ask a vague question like "whose doc is this" or "what is this about", use query_document with their uploaded documentId.
-
-Stay concise, but helpful.
-
-Try to strictly generate the response in proper markdown format so that it would render properly on frontend UI.
-You can decide the markdown style/design according to the scenario such as generating table, bold heading, etc.
-Try to make the chat interactive with adding some emojis and icons as you want.
 
 🛠️ Available Tools
 
@@ -972,66 +578,41 @@ You have access to the following tools:
    - Returns: Formatted syllabus content with topics
    - After displaying syllabus, provide smart study strategies
 
-4. **upload_document**
-   - Store uploaded documents for querying
-   - Required: documentId, fileName, fileContent (base64), fileType
-   - Returns: Upload confirmation with document statistics
-   - NOTE: Will return error for image-based PDFs with instructions
+Try to strictly generate the response in proper markdown format so that it would render properly on frontend UI.
+You can decide the markdown style/design according to the scenario such as generating table, bold heading, etc.
+Try to make the chat interactive with adding some emojis and icons as you want.
 
-5. **query_document**
-   - Answer questions about uploaded documents
-   - Required: documentId (can be actual ID or fileName), question
-   - Returns: Answer based ONLY on document content, or error if document is image-based
-   - IMPORTANT: Never mix general knowledge with document content
-`,
+Stay concise, but helpful.`,
 };
 
 const availableFunctions: Record<string, Function> = {
   get_attendance,
   get_timetable,
   get_syllabus_from_pdf,
-  upload_document,
-  query_document,
 };
 
 export async function POST(req: Request) {
-  const { messages, documentUpload } = await req.json();
+  const { messages } = await req.json();
   
-  // Handle document upload separately
-  if (documentUpload) {
-    const { documentId, fileName, fileContent, fileType } = documentUpload;
-    const result = await upload_document({ documentId, fileName, fileContent, fileType });
-    return new Response(
-      JSON.stringify({
-        message: {
-          role: "assistant",
-          content: result,
-        },
-      }),
-      { headers: { "Content-Type": "application/json" } }
-    );
-  }
-
   const userMessage = messages[messages.length - 1].content;
-console.log("\nUser input:", userMessage, "\n");
+  console.log("\nUser input:", userMessage, "\n");
 
-// ✅ Clean the messages to remove any malformed tool calls
-const cleanedMessages = messages.map((msg: any) => {
-  // Remove tool-related fields from user/assistant messages
-  if (msg.role === 'assistant' && msg.tool_calls) {
+  // ✅ Clean the messages to remove any malformed tool calls
+  const cleanedMessages = messages.map((msg: any) => {
+    if (msg.role === 'assistant' && msg.tool_calls) {
+      return {
+        role: msg.role,
+        content: msg.content || null,
+        tool_calls: msg.tool_calls
+      };
+    }
     return {
       role: msg.role,
-      content: msg.content || null,
-      tool_calls: msg.tool_calls
+      content: msg.content
     };
-  }
-  return {
-    role: msg.role,
-    content: msg.content
-  };
-});
+  });
 
-const updatedMessages = [systemMessage, ...cleanedMessages];
+  const updatedMessages = [systemMessage, ...cleanedMessages];
 
   try {
     // Call the main LLM to decide tool usage
@@ -1084,68 +665,8 @@ const updatedMessages = [systemMessage, ...cleanedMessages];
             { headers: { "Content-Type": "application/json" } }
           );
         }
-   
-        // ✅ 1. DOCUMENT QUERY: Enhanced with truncation warning
-        if (functionName === "query_document") {
-          if (typeof functionResponse === 'object' && functionResponse.content) {
-            let contextMessage = `Based ONLY on the following document content, please answer this question: "${functionResponse.question}"\n\nDocument Content:\n${functionResponse.content}\n\nIMPORTANT: Only use information from the document content above. Do not use your general knowledge.`;
-            
-            // Add truncation warning if applicable
-            if (functionResponse.isTruncated) {
-              contextMessage += `\n\n⚠️ NOTE: This document was truncated from ${functionResponse.originalLength.toLocaleString()} to 25,000 characters. If the answer is not found, inform the user and suggest they ask more specific questions.`;
-            }
-            
-            updatedMessages.push({
-              role: "user",
-              content: contextMessage,
-            });
 
-            try {
-              const docQueryResponse = await groq.chat.completions.create({
-                model: "llama-3.3-70b-versatile",
-                messages: updatedMessages,
-                max_tokens: 4096,
-              });
-
-              return new Response(
-                JSON.stringify({
-                  message: {
-                    role: "assistant",
-                    content: docQueryResponse.choices[0].message.content,
-                    tool_used: functionName,
-                  },
-                }),
-                { headers: { "Content-Type": "application/json" } }
-              );
-            } catch (docError: any) {
-              if (docError.status === 429) {
-                return new Response(
-                  JSON.stringify({
-                    message: {
-                      role: "assistant",
-                      content: handleRateLimitError(docError),
-                    },
-                  }),
-                  { headers: { "Content-Type": "application/json" } }
-                );
-              }
-              throw docError;
-            }
-          } else {
-            return new Response(
-              JSON.stringify({
-                message: {
-                  role: "assistant",
-                  content: functionResponse, // Error message
-                  tool_used: functionName,
-                },
-              }),
-              { headers: { "Content-Type": "application/json" } }
-            );
-          }
-        }
-
-        // ✅ 2. SYLLABUS & OTHERS: Append result to history (removed early return)
+        // ✅ SYLLABUS & OTHERS: Append result to history
         updatedMessages.push({
           role: "tool",
           tool_call_id: toolCall.id,
@@ -1153,9 +674,8 @@ const updatedMessages = [systemMessage, ...cleanedMessages];
           content: typeof functionResponse === 'string' ? functionResponse : JSON.stringify(functionResponse),
         });
 
-        // ✅ 3. NEW: Enhanced study tips instruction for syllabus - GUARANTEED TOPICS DISPLAY
+        // ✅ Enhanced study tips instruction for syllabus
         if (functionName === "get_syllabus_from_pdf") {
-          // Extract the formatted syllabus content from tool response
           const syllabusContent = typeof functionResponse === 'string' ? functionResponse : '';
           
           updatedMessages.push({
@@ -1236,7 +756,6 @@ IMPORTANT: Start by showing the complete syllabus content above, then add the st
   } catch (error: any) {
     console.error("API Error:", error);
     
-    // Handle rate limit errors
     if (error.status === 429) {
       return new Response(
         JSON.stringify({
@@ -1249,7 +768,6 @@ IMPORTANT: Start by showing the complete syllabus content above, then add the st
       );
     }
     
-    // Handle other errors
     return new Response(
       JSON.stringify({
         message: {
@@ -1281,7 +799,6 @@ IMPORTANT: Start by showing the complete syllabus content above, then add the st
 function handleRateLimitError(error: any): string {
   const errorMessage = error.error?.error?.message || error.message || '';
   
-  // Extract wait time if available
   let waitTime = '5-10 minutes';
   const timeMatch = errorMessage.match(/try again in (.+?)\./i);
   if (timeMatch) {
